@@ -250,85 +250,112 @@ def render():
 
     if isinstance(onchain_df, pd.DataFrame) and not onchain_df.empty:
         st.divider()
-        st.subheader("On-chain Values")
-        st.caption("Fetched from the VaultLens contract and used as the baseline for assumptions.")
-        cols = [
-            'configuredSymbol', 'inputAddress', 'vault', 'vaultName', 'vaultSymbol', 'assetSymbol',
-            'totalAssets', 'supplyCap',
-            'currentUtilization', 'currentBorrowApy', 'currentSupplyApy',
-            'nativeYield'
-        ]
-        existing_cols = [c for c in cols if c in onchain_df.columns]
-        remaining_cols = [c for c in onchain_df.columns if c not in existing_cols]
+        st.subheader("Vault Metrics")
+        st.caption("Combined on-chain values with utilization visualization.")
         
-        # Apply Styler for comma formatting
-        styled_df = onchain_df[existing_cols + remaining_cols].style.format(
-            {
-                "totalAssets": "{:,.2f}",
-                "supplyCap": "{:,.0f}",
-                "borrowCap": "{:,.0f}",
-                "totalCash": "{:,.2f}",
-                "totalBorrowed": "{:,.2f}",
-            },
-            na_rep="-",
-        )
+        # Select required columns
+        base_cols = [
+            'assetSymbol', 'totalAssets', 'totalBorrowed', 
+            'currentUtilization', 'currentBorrowApy', 'currentSupplyApy', 
+            'nativeYield', 'supplyCap', 'borrowCap'
+        ]
+        
+        # Ensure all columns exist
+        available_cols = [c for c in base_cols if c in onchain_df.columns]
+        dashboard_df = onchain_df[available_cols].copy()
+        
+        # Ensure numeric types and handle missing values
+        numeric_cols = ['totalAssets', 'supplyCap', 'totalBorrowed', 'borrowCap', 'currentUtilization']
+        for col in numeric_cols:
+            if col in dashboard_df.columns:
+                dashboard_df[col] = pd.to_numeric(dashboard_df[col], errors='coerce').fillna(0)
 
+        # Helper for K/M formatting
+        def fmt_val(val):
+            val = float(val) if pd.notnull(val) else 0
+            if val >= 1_000_000:
+                return f"{val/1_000_000:.2f}M"
+            elif val >= 1_000:
+                return f"{val/1_000:.2f}K"
+            else:
+                return f"{val:,.2f}"
+
+        # Calculate Fill Percentages (0-100) for Progress Bars
+        if 'totalAssets' in dashboard_df.columns and 'supplyCap' in dashboard_df.columns:
+            dashboard_df['supplyFill'] = dashboard_df.apply(
+                lambda x: (x['totalAssets'] / x['supplyCap'] * 100) if x['supplyCap'] > 0 else 0, 
+                axis=1
+            )
+            # Create display string: "Value / Cap"
+            dashboard_df['totalAssets_display'] = dashboard_df.apply(
+                lambda x: f"{fmt_val(x['totalAssets'])} / {fmt_val(x['supplyCap'])}",
+                axis=1
+            )
+        
+        if 'totalBorrowed' in dashboard_df.columns and 'borrowCap' in dashboard_df.columns:
+            dashboard_df['borrowFill'] = dashboard_df.apply(
+                lambda x: (x['totalBorrowed'] / x['borrowCap'] * 100) if x['borrowCap'] > 0 else 0, 
+                axis=1
+            )
+            # Create display string: "Value / Cap"
+            dashboard_df['totalBorrowed_display'] = dashboard_df.apply(
+                lambda x: f"{fmt_val(x['totalBorrowed'])} / {fmt_val(x['borrowCap'])}",
+                axis=1
+            )
+
+        # Define display order
+        final_cols = [
+            'assetSymbol', 
+            'totalAssets_display', 'supplyFill', 
+            'totalBorrowed_display', 'borrowFill', 
+            'currentUtilization', 
+            'currentBorrowApy', 'currentSupplyApy', 'nativeYield'
+        ]
+        # Filter to only cols that exist
+        final_df = dashboard_df[[c for c in final_cols if c in dashboard_df.columns]].copy()
+
+        # Create Styler for number formatting (Commas)
+        styler = final_df.style
+        format_dict = {
+            "currentBorrowApy": "{:.3f} %",
+            "currentSupplyApy": "{:.3f} %",
+            "nativeYield": "{:.3f} %",
+        }
+        styler.format(format_dict, na_rep="-")
+        
         st.dataframe(
-            styled_df,
+            styler,
             use_container_width=True,
             column_config={
-                "currentUtilization": st.column_config.NumberColumn("Util %", format="%.3f %%"),
-                "currentBorrowApy": st.column_config.NumberColumn("Borrow APY", format="%.3f %%"),
-                "currentSupplyApy": st.column_config.NumberColumn("Supply APY", format="%.3f %%"),
-                "nativeYield": st.column_config.NumberColumn("Native Yield", format="%.3f %%"),
-                "totalAssets": st.column_config.NumberColumn("Total Assets"),
-                "supplyCap": st.column_config.NumberColumn("Supply Cap"),
-                "borrowCap": st.column_config.NumberColumn("Borrow Cap"),
-                "totalCash": st.column_config.NumberColumn("Total Cash"),
-                "totalBorrowed": st.column_config.NumberColumn("Total Borrowed"),
-                "utilizationAtCaps": st.column_config.NumberColumn("Util @ Caps", format="%.3f %%"),
-                "capsBorrowApy": st.column_config.NumberColumn("Caps Borrow APY", format="%.3f %%"),
-                "capsSupplyApy": st.column_config.NumberColumn("Caps Supply APY", format="%.3f %%"),
-                "irm_kinkPercent": st.column_config.NumberColumn("IRM Kink %", format="%.3f %%"),
-                "irm_baseRateApy": st.column_config.NumberColumn("IRM Base APY", format="%.3f %%"),
-                "irm_rateAtKink": st.column_config.NumberColumn("IRM Rate @ Kink", format="%.3f %%"),
-                "irm_maximumRate": st.column_config.NumberColumn("IRM Max Rate", format="%.3f %%"),
-            },
+                "assetSymbol": st.column_config.TextColumn("Asset"),
+                "totalAssets_display": st.column_config.TextColumn("Total Assets (Value / Cap)"),
+                "supplyFill": st.column_config.ProgressColumn(
+                    "Supply Fill %", 
+                    format="%.1f %%", 
+                    min_value=0, 
+                    max_value=100,
+                    help="Assets / Supply Cap"
+                ),
+                "totalBorrowed_display": st.column_config.TextColumn("Total Borrowed (Value / Cap)"),
+                "borrowFill": st.column_config.ProgressColumn(
+                    "Borrow Fill %", 
+                    format="%.1f %%", 
+                    min_value=0, 
+                    max_value=100,
+                    help="Borrowed / Borrow Cap"
+                ),
+                "currentUtilization": st.column_config.ProgressColumn(
+                    "Util %", 
+                    format="%.1f %%", 
+                    min_value=0, 
+                    max_value=100,
+                    help="Utilization Rate"
+                ),
+                "currentBorrowApy": st.column_config.NumberColumn("Borrow APY"),
+                "currentSupplyApy": st.column_config.NumberColumn("Supply APY"),
+                "nativeYield": st.column_config.NumberColumn("Native Yield"),
+            }
         )
-
-    if isinstance(vault_object_map_by_input, dict) and vault_object_map_by_input:
-        st.divider()
-        st.subheader("Vault Objects")
-        st.caption("The Vault objects created from the fetched on-chain data (one row per configured vault).")
-        vault_objects_rows = []
-        for input_addr, vault in vault_object_map_by_input.items():
-            cfg = vault_cfg_map_by_input.get(input_addr, {}) if isinstance(vault_cfg_map_by_input, dict) else {}
-            vault_objects_rows.append(
-                {
-                    "optics": cfg.get("optics", ""),
-                    "inputAddress": input_addr,
-                    "vault": vault.vault,
-                    "assetSymbol": vault.asset_symbol,
-                    "currentBorrowApy": vault.current_borrow_apy,
-                    "currentSupplyApy": vault.current_supply_apy,
-                    "nativeYield": vault.nativeYield,
-                    "error": vault.error,
-                    "fetched": vault.fetched,
-                }
-            )
-        if vault_objects_rows:
-            st.dataframe(
-                pd.DataFrame(vault_objects_rows), 
-                use_container_width=True, 
-                hide_index=True,
-                column_config={
-                    "currentBorrowApy": st.column_config.NumberColumn("Borrow APY", format="%.3f %%"),
-                    "currentSupplyApy": st.column_config.NumberColumn("Supply APY", format="%.3f %%"),
-                    "nativeYield": st.column_config.NumberColumn("Native Yield", format="%.3f %%"),
-                }
-            )
-        else:
-            st.info("No vault objects available.")
 
         st.divider()
         st.subheader("Assumptions")
@@ -370,25 +397,97 @@ def render():
 
         editor_version = int(st.session_state.get("assumptions_editor_version", 0) or 0)
         editor_key = f"assumptions_{selected_cluster_name}_{editor_version}"
-        edited_assumptions_df = st.data_editor(
-            st.session_state["assumptions_df"],
+        
+        # Prepare DataFrame for editor (hide technical columns)
+        df_full = st.session_state["assumptions_df"]
+        visible_cols = [
+            "vaultSymbol", "assetSymbol", 
+            "supplyCap", "borrowCap", 
+            "kinkPercent", "baseRateApy", "rateAtKink", "maximumRate"
+        ]
+        # Ensure all columns exist
+        available_cols = [c for c in visible_cols if c in df_full.columns]
+        df_editor_view = df_full[available_cols].copy()
+        
+        # Format Caps as strings with commas for better readability in the editor
+        for col in ["supplyCap", "borrowCap"]:
+            if col in df_editor_view.columns:
+                df_editor_view[col] = df_editor_view[col].apply(
+                    lambda x: f"{x:,.0f}" if pd.notnull(x) else ""
+                )
+
+        edited_df_view = st.data_editor(
+            df_editor_view,
             num_rows="fixed",
             use_container_width=True,
             hide_index=True,
             key=editor_key,
             column_config={
-                "supplyCap": st.column_config.NumberColumn("Supply Cap", required=False, format="%.0f"),
-                "borrowCap": st.column_config.NumberColumn("Borrow Cap", required=False, format="%.0f"),
-                "kinkPercent": st.column_config.NumberColumn("Kink %", required=False, format="%.3f"),
-                "baseRateApy": st.column_config.NumberColumn("Base APY", required=False, format="%.3f"),
-                "rateAtKink": st.column_config.NumberColumn("Rate@Kink", required=False, format="%.3f"),
-                "maximumRate": st.column_config.NumberColumn("Max Rate", required=False, format="%.3f"),
+                "vaultSymbol": st.column_config.TextColumn("Vault", disabled=True, help="Vault Symbol"),
+                "assetSymbol": st.column_config.TextColumn("Asset", disabled=True, help="Underlying Asset"),
+                "supplyCap": st.column_config.TextColumn(
+                    "Supply Cap", 
+                    required=False, 
+                    help="Maximum amount that can be supplied (supports commas)",
+                    validate="^[0-9,]*$"
+                ),
+                "borrowCap": st.column_config.TextColumn(
+                    "Borrow Cap", 
+                    required=False, 
+                    help="Maximum amount that can be borrowed (supports commas)",
+                    validate="^[0-9,]*$"
+                ),
+                "kinkPercent": st.column_config.NumberColumn(
+                    "Kink %", 
+                    required=False, 
+                    format="%.3f %%",
+                    min_value=0,
+                    max_value=100,
+                    help="Utilization point where the interest rate slope increases"
+                ),
+                "baseRateApy": st.column_config.NumberColumn(
+                    "Base APY", 
+                    required=False, 
+                    format="%.3f %%",
+                    min_value=0,
+                    help="Interest rate at 0% utilization"
+                ),
+                "rateAtKink": st.column_config.NumberColumn(
+                    "Rate @ Kink", 
+                    required=False, 
+                    format="%.3f %%",
+                    min_value=0,
+                    help="Interest rate at the kink utilization"
+                ),
+                "maximumRate": st.column_config.NumberColumn(
+                    "Max Rate", 
+                    required=False, 
+                    format="%.3f %%",
+                    min_value=0,
+                    help="Interest rate at 100% utilization"
+                ),
             },
         )
-        st.session_state["assumptions_df"] = edited_assumptions_df
+        
+        # Update the main state DataFrame with edited values (converting strings back to floats)
+        if edited_df_view is not None:
+            df_to_update = edited_df_view.copy()
+            for col in ["supplyCap", "borrowCap"]:
+                if col in df_to_update.columns:
+                    # Clean commas and convert to numeric, handling errors
+                    df_to_update[col] = (
+                        df_to_update[col]
+                        .astype(str)
+                        .str.replace(",", "")
+                    )
+                    df_to_update[col] = pd.to_numeric(df_to_update[col], errors='coerce')
+            
+            # We use index alignment since num_rows is fixed
+            st.session_state["assumptions_df"].update(df_to_update)
 
         if st.button("Compute Strategies"):
-            for _, row in edited_assumptions_df.iterrows():
+            # Use the full dataframe which now has updated values
+            for _, row in st.session_state["assumptions_df"].iterrows():
                 input_addr = str(row.get("inputAddress", "")).strip()
                 vault = vault_object_map_by_input.get(input_addr)
                 if vault is None:
