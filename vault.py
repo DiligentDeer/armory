@@ -103,10 +103,10 @@ def decode_kink_params(hex_str: str) -> dict[str, Any]:
     kink_util = kink_raw / UINT32_MAX
 
     return {
-        "kinkPercent": kink_util,
-        "baseRateApy": to_apy(r0),
-        "rateAtKink": to_apy(r_kink),
-        "maximumRate": to_apy(r_100),
+        "kinkPercent": round(kink_util * 100, 3),
+        "baseRateApy": round(to_apy(r0) * 100, 3),
+        "rateAtKink": round(to_apy(r_kink) * 100, 3),
+        "maximumRate": round(to_apy(r_100) * 100, 3),
     }
 
 def get_vault_info_json(vault_address: str) -> dict[str, Any]:
@@ -127,11 +127,11 @@ def get_vault_info_json(vault_address: str) -> dict[str, Any]:
     vault_decimals = full_data.get("vaultDecimals", 0)
     scale_factor = 10 ** vault_decimals if vault_decimals else 1
 
-    total_cash = full_data.get("totalCash", 0) / scale_factor
-    total_borrowed = full_data.get("totalBorrowed", 0) / scale_factor
-    total_assets = full_data.get("totalAssets", 0) / scale_factor
-    supply_cap = full_data.get("supplyCap", 0) / scale_factor
-    borrow_cap = full_data.get("borrowCap", 0) / scale_factor
+    total_cash = round(full_data.get("totalCash", 0) / scale_factor, 2)
+    total_borrowed = round(full_data.get("totalBorrowed", 0) / scale_factor, 2)
+    total_assets = round(full_data.get("totalAssets", 0) / scale_factor, 2)
+    supply_cap = round(full_data.get("supplyCap", 0) / scale_factor, 0)
+    borrow_cap = round(full_data.get("borrowCap", 0) / scale_factor, 0)
 
     filtered: dict[str, Any] = {
         "timestamp": full_data.get("timestamp"),
@@ -161,32 +161,6 @@ def get_vault_info_json(vault_address: str) -> dict[str, Any]:
             filtered["interestRateModelInfo"] = decode_kink_params(params_hex)
         elif not irm_type and len(params_hex) >= 2 + 64 * 4:
             filtered["interestRateModelInfo"] = decode_kink_params(params_hex)
-
-    current_utilization = 0.0
-    if total_assets > 0:
-        current_utilization = total_borrowed / total_assets
-
-    utilization_at_caps = 0.0
-    if supply_cap > 0:
-        utilization_at_caps = borrow_cap / supply_cap
-
-    filtered["currentUtilization"] = current_utilization
-    filtered["utilizationAtCaps"] = utilization_at_caps
-
-    irm_params = filtered.get("interestRateModelInfo", {})
-    if irm_params and "kinkPercent" in irm_params:
-        kink = irm_params.get("kinkPercent", 0)
-        base = irm_params.get("baseRateApy", 0)
-        rate_at_kink = irm_params.get("rateAtKink", 0)
-        max_rate = irm_params.get("maximumRate", 0)
-
-        curr_borrow_apy, curr_supply_apy = calculate_rates(current_utilization, kink, base, rate_at_kink, max_rate)
-        filtered["currentBorrowApy"] = curr_borrow_apy
-        filtered["currentSupplyApy"] = curr_supply_apy
-
-        caps_borrow_apy, caps_supply_apy = calculate_rates(utilization_at_caps, kink, base, rate_at_kink, max_rate)
-        filtered["capsBorrowApy"] = caps_borrow_apy
-        filtered["capsSupplyApy"] = caps_supply_apy
 
     raw_ltv_info = full_data.get("collateralLTVInfo", [])
     if isinstance(raw_ltv_info, list):
@@ -244,7 +218,7 @@ def get_apy_by_pool_id(pool_id, field):
                 if value is None:
                     continue
                 try:
-                    return float(value) / 100
+                    return float(value)
                 except Exception:
                     continue
             return 0
@@ -304,6 +278,40 @@ class Vault:
             self.error = str(e)
             self.fetched = False
 
+    def compute_derived_fields(self) -> None:
+        self.current_utilization = 0.0
+        if self.total_assets > 0:
+            self.current_utilization = round((self.total_borrowed / self.total_assets) * 100, 3)
+
+        self.utilization_at_caps = 0.0
+        if self.supply_cap > 0:
+            self.utilization_at_caps = round((self.borrow_cap / self.supply_cap) * 100, 3)
+
+        if self.interest_rate_model_info and "kinkPercent" in self.interest_rate_model_info:
+            # Create 0-1 scaled version for calculation, as params are stored in 0-100 scale
+            irm_scaled = {
+                "kinkPercent": float(self.interest_rate_model_info.get("kinkPercent", 0) or 0) / 100,
+                "baseRateApy": float(self.interest_rate_model_info.get("baseRateApy", 0) or 0) / 100,
+                "rateAtKink": float(self.interest_rate_model_info.get("rateAtKink", 0) or 0) / 100,
+                "maximumRate": float(self.interest_rate_model_info.get("maximumRate", 0) or 0) / 100,
+            }
+            borrow_apy, supply_apy = calculate_rates(
+                self.current_utilization / 100, irm_scaled
+            )
+            self.current_borrow_apy = round(borrow_apy * 100, 3)
+            self.current_supply_apy = round(supply_apy * 100, 3)
+
+            caps_borrow_apy, caps_supply_apy = calculate_rates(
+                self.utilization_at_caps / 100, irm_scaled
+            )
+            self.caps_borrow_apy = round(caps_borrow_apy * 100, 3)
+            self.caps_supply_apy = round(caps_supply_apy * 100, 3)
+        else:
+            self.current_borrow_apy = 0.0
+            self.current_supply_apy = 0.0
+            self.caps_borrow_apy = 0.0
+            self.caps_supply_apy = 0.0
+
     def refresh(self) -> None:
         data = get_vault_info_json(self.vault_address)
         self.raw = dict(data) if isinstance(data, dict) else {"value": data}
@@ -331,15 +339,9 @@ class Vault:
 
         ltv_info = data.get("collateralLTVInfo")
         self.collateral_ltv_info = list(ltv_info) if isinstance(ltv_info, list) else []
+        self.compute_derived_fields()
 
-        self.current_utilization = self._as_float(data.get("currentUtilization"))
-        self.utilization_at_caps = self._as_float(data.get("utilizationAtCaps"))
-        self.current_borrow_apy = self._as_float(data.get("currentBorrowApy"))
-        self.current_supply_apy = self._as_float(data.get("currentSupplyApy"))
-        self.caps_borrow_apy = self._as_float(data.get("capsBorrowApy"))
-        self.caps_supply_apy = self._as_float(data.get("capsSupplyApy"))
-
-        self.nativeYield = float(get_apy_by_pool_id(self.defillama_pool, self.defillama_field) or 0.0)
+        self.nativeYield = round(float(get_apy_by_pool_id(self.defillama_pool, self.defillama_field) or 0.0), 3)
 
         self.error = None
         self.fetched = True
