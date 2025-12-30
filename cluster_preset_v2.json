@@ -1,0 +1,54 @@
+[
+    {
+        "name": "Sentora RLUSD",
+        "vaults": [
+            {
+            "optics": "RLUSD",
+            "address": "0xaF5372792a29dC6b296d6FFD4AA3386aff8f9BB2",
+            "defillama_pool": "73e933a7-73b2-43ec-b1e9-d5d1d42ce2de",
+            "field": "apyReward"
+            },
+            {
+            "optics": "USDC",
+            "address": "0x9bD52F2805c6aF014132874124686e7b248c2Cbb",
+            "defillama_pool": "",
+            "field": ""
+            },
+            {
+            "optics": "sUSDe",
+            "address": "0x56B829e465170c3aCcAd33a3E0512b239b202242",
+            "defillama_pool": "66985a81-9c51-46ca-9977-42b4fe7bc6df",
+            "field": "apy"
+            }
+        ]
+    },
+    {
+        "name": "Sentora PYUSD",
+        "vaults": [
+            {
+            "optics": "PYUSD",
+            "address": "0xba98fC35C9dfd69178AD5dcE9FA29c64554783b5",
+            "defillama_pool": "fa55aa2b-e244-4ce4-ab00-9e96b39df32b",
+            "field": "apyReward"
+            },
+            {
+            "optics": "USDC",
+            "address": "0xAB2726DAf820Aa9270D14Db9B18c8d187cbF2f30",
+            "defillama_pool": "",
+            "field": ""
+            },
+            {
+            "optics": "USDe",
+            "address": "0x660750B98c3a53DD1303f2e43F543eF037d3F625",
+            "defillama_pool": "",
+            "field": ""
+            },
+            {
+            "optics": "sUSDe",
+            "address": "0xdB6165bd1F90cb507F30AbDb42c4596CE4D894f4",
+            "defillama_pool": "66985a81-9c51-46ca-9977-42b4fe7bc6df",
+            "field": "apy"
+            }
+        ]
+    }
+]
