@@ -9,6 +9,9 @@ def calculate_rates(
 ) -> tuple[float, float]:
     if isinstance(irm_info_or_kink, dict):
         kink = float(irm_info_or_kink.get("kinkPercent", 0) or 0)
+        # Normalize kink to 0-1 if it is in percentage (e.g. 80.0)
+        if kink > 1:
+            kink = kink / 100.0
         base_rate = float(irm_info_or_kink.get("baseRateApy", 0) or 0)
         rate_at_kink = float(irm_info_or_kink.get("rateAtKink", 0) or 0)
         max_rate = float(irm_info_or_kink.get("maximumRate", 0) or 0)

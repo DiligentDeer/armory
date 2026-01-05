@@ -5,6 +5,7 @@ import pandas as pd
 
 from vault import Vault
 from strategy import Strategy, construct_strategies
+from utils import calculate_rates
 
 # --- Constants ---
 PRESET_FILE = os.path.join(os.path.dirname(__file__), "cluster_preset_v2.json")
@@ -281,8 +282,7 @@ def render_vault_metrics(onchain_df):
 def render_assumptions_editor(selected_cluster_name, vault_object_map_by_input):
     """Render the Assumptions editor and handle resets."""
     st.divider()
-    st.subheader("Assumptions")
-    st.caption("Edit caps + IRM parameters here, then recompute strategies. These edits do not change the preset file.")
+    st.subheader("Assumptions", help="Edit caps + IRM parameters here, then recompute strategies. These edits do not change the preset file.")
     
     # Ensure state exists
     assumptions_base_df = st.session_state.get("onchain_assumptions_df")
@@ -299,9 +299,181 @@ def render_assumptions_editor(selected_cluster_name, vault_object_map_by_input):
         st.session_state["assumptions_df"]["nativeYield"] = st.session_state["assumptions_df"]["inputAddress"].apply(
             lambda addr: vault_object_map_by_input.get(str(addr)).nativeYield if vault_object_map_by_input.get(str(addr)) else 0.0
         )
+    
+    # Get current version for key generation
+    version = st.session_state.get("assumptions_editor_version", 0)
+    
+    # Helper to update session state
+    def update_assumption(idx, col, key):
+        # Value is automatically in session_state via key, but we need to sync it to the dataframe
+        val = st.session_state[key]
+        st.session_state["assumptions_df"].at[idx, col] = val
 
-    # Reset Button
-    if st.button("Reset Assumptions to On-chain"):
+    # Header Row
+    # Columns: Vault (1.2), Supply Cap (2), Borrow Cap (2), Util % (1), Kink % (1), Base % (1), Rate at Kink % (1), Max % (1), Native % (1), Borrow % Caps (1), Supply % Caps (1)
+    col_ratios = [1, 1.5, 1.5, 1, 1, 1, 1, 1, 1, 1, 1]
+    headers = [
+        "Vault", "Supply Cap", "Borrow Cap", "Util %", 
+        "Kink Rate %", "Base Rate %", "Rate at Kink %", "Max Rate %", "Native %", 
+        "Borrow % Caps", "Supply % Caps"
+    ]
+    
+    h_cols = st.columns(col_ratios, gap="small")
+    for c, h in zip(h_cols, headers):
+        c.markdown(f"**{h}**")
+    
+    st.markdown("<hr style='margin: 2px 0px 5px 0px; padding: 0px;'>", unsafe_allow_html=True)
+
+    for idx, row in st.session_state["assumptions_df"].iterrows():
+        cols = st.columns(col_ratios, gap="small")
+        
+        # Original Values (for tooltip)
+        orig_supply = assumptions_base_df.at[idx, "supplyCap"] if idx in assumptions_base_df.index else 0
+        orig_borrow = assumptions_base_df.at[idx, "borrowCap"] if idx in assumptions_base_df.index else 0
+        orig_kink = assumptions_base_df.at[idx, "kinkPercent"] if idx in assumptions_base_df.index else 0
+        orig_base = assumptions_base_df.at[idx, "baseRateApy"] if idx in assumptions_base_df.index else 0
+        orig_kink_rate = assumptions_base_df.at[idx, "rateAtKink"] if idx in assumptions_base_df.index else 0
+        orig_max = assumptions_base_df.at[idx, "maximumRate"] if idx in assumptions_base_df.index else 0
+        orig_native = assumptions_base_df.at[idx, "nativeYield"] if idx in assumptions_base_df.index else 0
+
+        # 1. Vault Name
+        with cols[0]:
+            st.write(f"**{row['vaultSymbol']}**")
+        
+        # 2. Supply Cap
+        with cols[1]:
+            key_supply = f"input_supplyCap_{idx}_v{version}"
+            st.number_input(
+                "Supply Cap",
+                value=float(row['supplyCap']),
+                key=key_supply,
+                on_change=update_assumption,
+                args=(idx, "supplyCap", key_supply),
+                step=1_000_000.0,
+                format="%.0f",
+                label_visibility="collapsed",
+                help=f"Current: {fmt_val(orig_supply)}"
+            )
+
+        # 3. Borrow Cap
+        with cols[2]:
+            key_borrow = f"input_borrowCap_{idx}_v{version}"
+            st.number_input(
+                "Borrow Cap",
+                value=float(row['borrowCap']),
+                key=key_borrow,
+                on_change=update_assumption,
+                args=(idx, "borrowCap", key_borrow),
+                step=1_000_000.0,
+                format="%.0f",
+                label_visibility="collapsed",
+                help=f"Current: {fmt_val(orig_borrow)}"
+            )
+
+        # 4. Util %
+        with cols[3]:
+            s_cap = float(row['supplyCap'] or 0)
+            b_cap = float(row['borrowCap'] or 0)
+            utilization = (b_cap / s_cap) if s_cap > 0 else 0
+            st.markdown(f"<div style='padding-top: 5px;'>{utilization * 100:.1f} %</div>", unsafe_allow_html=True)
+
+        # Helper for rate inputs
+        def rate_input(col_idx, field, orig_val, step=0.1):
+            with cols[col_idx]:
+                key_rate = f"input_{field}_{idx}_v{version}"
+                st.number_input(
+                    field,
+                    value=float(row[field] or 0),
+                    key=key_rate,
+                    on_change=update_assumption,
+                    args=(idx, field, key_rate),
+                    step=step,
+                    format="%.3f",
+                    label_visibility="collapsed",
+                    help=f"Current: {orig_val:.2f}%"
+                )
+
+        # 5. Kink %
+        rate_input(4, "kinkPercent", orig_kink, 1.0)
+        
+        # 6. Base %
+        rate_input(5, "baseRateApy", orig_base)
+        
+        # 7. Rate at Kink %
+        rate_input(6, "rateAtKink", orig_kink_rate)
+        
+        # 8. Max %
+        rate_input(7, "maximumRate", orig_max, 1.0)
+        
+        # 9. Native %
+        rate_input(8, "nativeYield", orig_native)
+        
+        # Calculate Real-time Rates for Caps
+        irm_info = {
+            "kinkPercent": float(row['kinkPercent'] or 0) / 100,
+            "baseRateApy": float(row['baseRateApy'] or 0) / 100,
+            "rateAtKink": float(row['rateAtKink'] or 0) / 100,
+            "maximumRate": float(row['maximumRate'] or 0) / 100
+        }
+        
+        borrow_rate_cap, supply_rate_cap = calculate_rates(
+            utilization=utilization,
+            irm_info_or_kink=irm_info
+        )
+        
+        # 10. Borrow % Caps
+        with cols[9]:
+            st.markdown(f"<div style='padding-top: 5px;'>{borrow_rate_cap*100:.2f} %</div>", unsafe_allow_html=True)
+            
+        # 11. Supply % Caps
+        with cols[10]:
+            st.markdown(f"<div style='padding-top: 5px;'>{supply_rate_cap*100:.2f} %</div>", unsafe_allow_html=True)
+
+def compute_and_render_strategies(vault_object_map_by_input, vault_object_map_by_vault):
+    """Compute strategies based on current assumptions and display them."""
+    
+    col1, col2, spacer = st.columns([2, 3, 9])
+
+    with col1:
+        compute_clicked = st.button("Compute Strategies", use_container_width=True)
+
+    with col2:
+        reset_clicked = st.button("Reset Assumptions to On-chain", use_container_width=True)
+        
+    with st.expander("Show Changes"):
+        current_df = st.session_state.get("assumptions_df")
+        base_df = st.session_state.get("onchain_assumptions_df")
+        
+        if isinstance(current_df, pd.DataFrame) and isinstance(base_df, pd.DataFrame):
+            changes = []
+            cols_to_check = ['supplyCap', 'borrowCap', 'kinkPercent', 'baseRateApy', 'rateAtKink', 'maximumRate', 'nativeYield']
+            
+            for idx, row in current_df.iterrows():
+                if idx not in base_df.index: continue
+                base_row = base_df.loc[idx]
+                vault_symbol = row.get('vaultSymbol', 'Unknown')
+                
+                for col in cols_to_check:
+                    curr_val = float(row.get(col, 0) or 0)
+                    base_val = float(base_row.get(col, 0) or 0)
+                    
+                    if abs(curr_val - base_val) > 1e-6:
+                        changes.append({
+                            "Vault": vault_symbol,
+                            "Field": col,
+                            "Original": base_val,
+                            "New": curr_val,
+                            "Diff": curr_val - base_val
+                        })
+            
+            if changes:
+                st.info("Differences from On-chain Values:")
+                st.dataframe(pd.DataFrame(changes), hide_index=True, use_container_width=True)
+            else:
+                st.success("No changes found compared to on-chain values.")
+
+    if reset_clicked:
+        assumptions_base_df = st.session_state.get("onchain_assumptions_df")
         st.session_state["assumptions_df"] = assumptions_base_df.copy()
         st.session_state["assumptions_editor_version"] = int(st.session_state.get("assumptions_editor_version", 0) or 0) + 1
         
@@ -318,51 +490,7 @@ def render_assumptions_editor(selected_cluster_name, vault_object_map_by_input):
         st.session_state.pop("strategy_rows", None)
         st.rerun()
 
-    # Editor View
-    editor_key = f"assumptions_{selected_cluster_name}_{st.session_state.get('assumptions_editor_version', 0)}"
-    df_full = st.session_state["assumptions_df"]
-    
-    # Prepare Display DataFrame
-    visible_cols = ["vaultSymbol", "assetSymbol", "supplyCap", "borrowCap", "kinkPercent", "baseRateApy", "rateAtKink", "maximumRate", "nativeYield"]
-    df_editor_view = df_full[[c for c in visible_cols if c in df_full.columns]].copy()
-    
-    # Format Caps with Commas for View
-    for col in ["supplyCap", "borrowCap"]:
-        if col in df_editor_view.columns:
-            df_editor_view[col] = df_editor_view[col].apply(lambda x: f"{x:,.0f}" if pd.notnull(x) else "")
-
-    edited_df_view = st.data_editor(
-        df_editor_view,
-        num_rows="fixed",
-        width="stretch",
-        hide_index=True,
-        key=editor_key,
-        column_config={
-            "vaultSymbol": st.column_config.TextColumn("Vault", disabled=True),
-            "assetSymbol": st.column_config.TextColumn("Asset", disabled=True),
-            "supplyCap": st.column_config.TextColumn("Supply Cap", validate="^[0-9,]*$"),
-            "borrowCap": st.column_config.TextColumn("Borrow Cap", validate="^[0-9,]*$"),
-            "kinkPercent": st.column_config.NumberColumn("Kink %", format="%.3f %%", min_value=0, max_value=100),
-            "baseRateApy": st.column_config.NumberColumn("Base APY", format="%.3f %%", min_value=0),
-            "rateAtKink": st.column_config.NumberColumn("Rate @ Kink", format="%.3f %%", min_value=0),
-            "maximumRate": st.column_config.NumberColumn("Max Rate", format="%.3f %%", min_value=0),
-            "nativeYield": st.column_config.NumberColumn("Native Yield", format="%.3f %%"),
-        },
-    )
-
-    # Sync edits back to session state
-    if edited_df_view is not None:
-        df_to_update = edited_df_view.copy()
-        for col in ["supplyCap", "borrowCap"]:
-            if col in df_to_update.columns:
-                df_to_update[col] = df_to_update[col].astype(str).str.replace(",", "")
-                df_to_update[col] = pd.to_numeric(df_to_update[col], errors='coerce')
-        
-        st.session_state["assumptions_df"].update(df_to_update)
-
-def compute_and_render_strategies(vault_object_map_by_input, vault_object_map_by_vault):
-    """Compute strategies based on current assumptions and display them."""
-    if st.button("Compute Strategies"):
+    if compute_clicked:
         # 1. Update Vault Objects from Assumptions DF
         for _, row in st.session_state["assumptions_df"].iterrows():
             input_addr = str(row.get("inputAddress", "")).strip()
@@ -406,6 +534,11 @@ def compute_and_render_strategies(vault_object_map_by_input, vault_object_map_by
                     "collateralAsset": coll_vault.asset_symbol or coll_vault.vault_symbol or coll_vault.vault_address,
                     "currentYield": strategy_obj.calculate_current_yield(),
                     "capsYield": strategy_obj.calculate_caps_yield(),
+                    # Store keys to reconstruct Strategy object later
+                    "debtVaultKey": s.get("debtAsset"),
+                    "collateralVaultKey": s.get("collateralAsset"),
+                    "borrowLTV": s.get("borrowLTV"),
+                    "liquidationLTV": s.get("liquidationLTV"),
                 })
             except Exception:
                 continue
@@ -427,7 +560,7 @@ def compute_and_render_strategies(vault_object_map_by_input, vault_object_map_by
             color = 'green' if val >= 0 else 'red'
             return f'color: {color}'
             
-        styler = df.style.map(color_yield, subset=["currentYield", "capsYield"])
+        styler = df[["strategy", "debtAsset", "collateralAsset", "currentYield", "capsYield"]].style.map(color_yield, subset=["currentYield", "capsYield"])
         styler.format({
             "currentYield": "{:.3f} %",
             "capsYield": "{:.3f} %",
@@ -446,9 +579,72 @@ def compute_and_render_strategies(vault_object_map_by_input, vault_object_map_by
             }
         )
 
+        # 4. Strategy Analysis Chart
+        st.divider()
+        st.subheader("Strategy Analysis")
+        st.caption("Visualize yield sensitivity to utilization changes.")
+        
+        selected_strategy_name = st.selectbox(
+            "Select Strategy", 
+            [r["strategy"] for r in strategy_rows],
+            key="strategy_chart_select"
+        )
+        
+        if selected_strategy_name:
+            # Find the selected row
+            selected_row = next((r for r in strategy_rows if r["strategy"] == selected_strategy_name), None)
+            
+            if selected_row:
+                # Reconstruct Strategy Object
+                d_key = selected_row.get("debtVaultKey")
+                c_key = selected_row.get("collateralVaultKey")
+                
+                d_vault = vault_object_map_by_vault.get(d_key)
+                c_vault = vault_object_map_by_vault.get(c_key)
+                
+                if d_vault and c_vault:
+                    strat = Strategy(
+                        debtVault=d_vault,
+                        collateralVault=c_vault,
+                        borrowLTV=float(selected_row.get("borrowLTV") or 0),
+                        liquidationLTV=float(selected_row.get("liquidationLTV") or 0)
+                    )
+                    
+                    # Generate and Display Heatmap
+                    fig = strat.generate_simulation_chart()
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    st.divider()
+                    
+                    # Two Column Layout for Sensitivity Analysis
+                    col_sens1, col_sens2 = st.columns(2)
+                    
+                    with col_sens1:
+                        st.markdown("#### Yield vs Collateral Util")
+                        fixed_debt_util = st.slider(
+                            "Fixed Debt Utilization (%)", 
+                            min_value=0, max_value=100, value=50, step=1,
+                            key="slider_fixed_debt"
+                        )
+                        fig_coll = strat.generate_collateral_sensitivity_chart(fixed_debt_util / 100.0)
+                        st.plotly_chart(fig_coll, use_container_width=True)
+                        
+                    with col_sens2:
+                        st.markdown("#### Yield vs Debt Util")
+                        fixed_coll_util = st.slider(
+                            "Fixed Collateral Utilization (%)", 
+                            min_value=0, max_value=100, value=50, step=1,
+                            key="slider_fixed_coll"
+                        )
+                        fig_debt = strat.generate_debt_sensitivity_chart(fixed_coll_util / 100.0)
+                        st.plotly_chart(fig_debt, use_container_width=True)
+
 # --- Main Execution Flow ---
 
 def main():
+
+    st.set_page_config(layout="wide")
+
     st.title("Vault Cluster Manager")
     
     # 1. Initialization
